@@ -1,74 +1,93 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
+from datetime import date, timedelta
 
-st.set_page_config(page_title="급등 전 후보 탐색기 2.0", layout="wide")
-st.title("📈 급등 전 후보 탐색기 2.0")
-st.caption("5~7거래일 관찰용 조건검색 · 실시간 시세 미연결 · 투자 권유 아님")
-f=st.file_uploader("일별 주가 CSV 업로드", type="csv")
-st.info("필수: date,ticker,name,close,volume | 권장: open,high,low,foreign_net,institution_net,sector,news_score")
-if f is None: st.stop()
-try:
-    df=pd.read_csv(f,dtype={"ticker":str})
-    req={"date","ticker","name","close","volume"}
-    if req-set(df.columns): st.error(f"필수 열 누락: {req-set(df.columns)}"); st.stop()
-    df["date"]=pd.to_datetime(df["date"],errors="coerce")
-    for c in ["open","high","low","close","volume","foreign_net","institution_net","news_score"]:
-        if c not in df: df[c]=np.nan
-        df[c]=pd.to_numeric(df[c],errors="coerce")
-    if "sector" not in df: df["sector"]="미분류"
-    df=df.dropna(subset=["date","ticker","close","volume"]).sort_values(["ticker","date"]).drop_duplicates(["ticker","date"],keep="last")
-    if df.empty: st.error("유효한 데이터가 없습니다."); st.stop()
-    threshold=st.sidebar.slider("최소 거래량 증가배수",1.0,3.0,1.2,0.1)
-    min_score=st.sidebar.slider("최소 종합점수",0,100,50,5)
+st.set_page_config(page_title="급등 전 후보 탐색기 3.0", layout="wide")
+st.title("📈 급등 전 후보 탐색기 3.0")
+st.caption("실제 일별 시세 기반 관찰 후보 · 15분 지연 또는 전일 데이터 가능 · 투자 권유 아님")
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_data(ticker, start, end):
+    import yfinance as yf
+    x = yf.download(ticker, start=start, end=end, auto_adjust=True, progress=False, threads=False)
+    if x.empty:
+        return None
+    if isinstance(x.columns, pd.MultiIndex):
+        x.columns = x.columns.get_level_values(0)
+    x = x.reset_index()
+    x.columns = [str(c).lower() for c in x.columns]
+    return x
+
+def screen(df, name, ticker):
+    if df is None or len(df) < 65:
+        return None
+    d=df.copy().sort_values("date")
+    for col in ("close","high","low","volume"):
+        d[col]=pd.to_numeric(d[col],errors="coerce")
+    d=d.dropna(subset=["close","volume"])
+    if len(d)<65: return None
+    c=d["close"]; v=d["volume"]
+    ma5=c.rolling(5).mean().iloc[-1]
+    ma20=c.rolling(20).mean().iloc[-1]
+    ma60=c.rolling(60).mean().iloc[-1]
+    vol_ratio=float(v.iloc[-5:].mean()/max(v.iloc[-25:-5].mean(),1))
+    change5=float((c.iloc[-1]/c.iloc[-6]-1)*100)
+    change20=float((c.iloc[-1]/c.iloc[-21]-1)*100)
+    peak20=float(d["high"].iloc[-21:-1].max())
+    breakout=float(c.iloc[-1]/peak20)
+    score=0
+    score+=25 if ma5>ma20>ma60 else 0
+    score+=20 if 1.1<=vol_ratio<=3.5 else 0
+    score+=20 if -1<=change5<=8 else 0
+    score+=15 if 0.97<=breakout<=1.03 else 0
+    score+=10 if -5<=change20<=15 else 0
+    score+=10 if c.iloc[-1]>ma20 else 0
+    price=float(c.iloc[-1])
+    low5=float(d["low"].iloc[-5:].min())
+    stop=min(low5,price*.96)
+    risk=max(price-stop,price*.01)
+    return dict(종목=name,코드=ticker,기준일=str(d["date"].iloc[-1])[:10],
+                종가=round(price),점수=score,거래량배율=round(vol_ratio,2),
+                **{"5일변동(%)":round(change5,2)},
+                관심매수가=round(min(price,ma5)),목표가=round(price+2*risk),
+                손절가=round(stop),취소조건="종가가 20일선 이탈 또는 거래량 급감")
+
+st.info("이 버전은 선택한 종목의 실제 일봉을 자동 조회합니다. 한국 전체 상장종목을 전수 검색하거나 실시간 매매 신호를 제공하지 않습니다.")
+universe={
+    "삼성전자":"005930.KS","SK하이닉스":"000660.KS","NAVER":"035420.KS",
+    "현대차":"005380.KS","기아":"000270.KS","LG에너지솔루션":"373220.KS",
+    "셀트리온":"068270.KS","한화에어로스페이스":"012450.KS",
+    "두산에너빌리티":"034020.KS","카카오":"035720.KS",
+    "삼성전기":"009150.KS","포스코퓨처엠":"003670.KS",
+}
+selected=st.multiselect("분석할 종목 (최대 12개)",list(universe),default=list(universe)[:6])
+threshold=st.slider("최소 후보 점수",0,100,40,5)
+if st.button("실제 일봉 조회하고 분석",type="primary"):
     results=[]
-    for ticker,g in df.groupby("ticker"):
-        g=g.tail(130).copy()
-        if len(g)<35 or (g.close<=0).any() or (g.volume<0).any(): continue
-        c=g.close; v=g.volume; last=g.iloc[-1]
-        ma5=c.rolling(5).mean(); ma20=c.rolling(20).mean(); ma60=c.rolling(60).mean()
-        vol_ratio=v.tail(5).mean()/max(v.tail(20).mean(),1)
-        ret5=c.iloc[-1]/c.iloc[-6]-1
-        near_high=c.iloc[-1]/c.tail(20).max()
-        golden=bool(ma5.iloc[-2]<=ma20.iloc[-2] and ma5.iloc[-1]>ma20.iloc[-1])
-        trend=bool(c.iloc[-1]>=ma20.iloc[-1] and ma5.iloc[-1]>=ma20.iloc[-1])
-        # '공구리'는 공식 표준지표가 아니므로 20일선 근처 횡보+변동성 축소로 근사
-        consolidation=bool(c.tail(10).max()/c.tail(10).min()-1<0.10 and abs(c.iloc[-1]/ma20.iloc[-1]-1)<0.05)
-        support=float(c.tail(20).min()); resistance=float(c.tail(20).max())
-        foreign=g.foreign_net.tail(5).sum(min_count=1); inst=g.institution_net.tail(5).sum(min_count=1)
-        flow=int(pd.notna(foreign) and foreign>0)+int(pd.notna(inst) and inst>0)
-        news=last.news_score
-        # 점수는 검증 전 휴리스틱; 뉴스 점수는 외부에서 -1~1로 공급된 경우만 반영
-        score=min(vol_ratio/2,1)*25+int(trend)*20+int(golden)*10+int(consolidation)*15+flow*10+max(0,min((near_high-.9)/.1,1))*10
-        if pd.notna(news): score+=max(0,min(float(news),1))*10
-        score=min(round(score,1),100)
-        if vol_ratio<threshold or score<min_score: continue
-        results.append({"종목코드":ticker,"종목명":last["name"],"기준일":last.date.date(),
-          "업종":last.sector,"종가":round(float(c.iloc[-1]),2),"점수":score,
-          "거래량배수":round(vol_ratio,2),"5일수익률(%)":round(ret5*100,2),
-          "골든크로스":golden,"추세양호":trend,"공구리근사":consolidation,
-          "외국인5일순매수":foreign,"기관5일순매수":inst,
-          "지지선(참고)":round(support,2),"저항선(참고)":round(resistance,2),
-          "관찰매수가(참고)":round(float(ma20.iloc[-1]),2),
-          "목표가(예시+5%)":round(float(c.iloc[-1])*1.05,2),
-          "손절가(예시-3%)":round(float(c.iloc[-1])*.97,2)})
-    if not results: st.warning("조건에 맞는 후보가 없습니다. 기준을 완화하거나 데이터 기간을 늘려보세요."); st.stop()
-    out=pd.DataFrame(results).sort_values(["점수","거래량배수"],ascending=False)
-    st.subheader("상위 5개 후보")
-    st.dataframe(out.head(5),use_container_width=True,hide_index=True)
-    st.subheader("최종 우선 관찰 1종목")
-    st.dataframe(out.head(1),use_container_width=True,hide_index=True)
-    st.caption("매수가·목표가·손절가는 기계적 참고값이며 실제 주문 신호가 아닙니다. 데이터 누락 시 점수는 과소평가될 수 있습니다.")
-    st.subheader("업종별 후보 평균 점수")
-    st.bar_chart(out.groupby("업종")["점수"].mean())
-    st.download_button("후보 CSV 다운로드",out.to_csv(index=False).encode("utf-8-sig"),"candidates_v2.csv","text/csv")
-    st.subheader("매매 기록")
-    with st.form("trade"):
-        name=st.text_input("종목명"); buy=st.number_input("매수가",min_value=0.0); sell=st.number_input("매도가",min_value=0.0)
-        if st.form_submit_button("수익률 계산"):
-            if buy>0: st.metric("수익률(수수료·세금 제외)",f"{(sell/buy-1)*100:.2f}%")
-            else: st.warning("매수가를 입력하세요.")
-    st.warning("백테스트·뉴스 자동수집·실시간 수급·시장 전체 자동 스캔은 별도 데이터 연동이 필요합니다. 이 버전에는 포함되지 않았습니다.")
-except Exception as e:
-    st.error(f"데이터 처리 오류: {e}")
+    failures=[]
+    for name in selected[:12]:
+        ticker=universe[name]
+        try:
+            df=get_data(ticker,(date.today()-timedelta(days=240)).isoformat(),(date.today()+timedelta(days=1)).isoformat())
+            r=screen(df,name,ticker)
+            if r: results.append(r)
+            else: failures.append(name)
+        except Exception:
+            failures.append(name)
+    if results:
+        all_df=pd.DataFrame(results).sort_values("점수",ascending=False)
+        st.subheader("관찰 후보 TOP 3")
+        filtered=all_df[all_df["점수"]>=threshold].head(3)
+        if filtered.empty:
+            st.warning("설정 점수 이상인 후보가 없습니다. 점수를 낮춰 비교해보세요.")
+        else:
+            st.dataframe(filtered,hide_index=True,use_container_width=True)
+            st.write("가장 높은 관찰 점수:",filtered.iloc[0]["종목"],"— 매수 확정 신호가 아닙니다.")
+        with st.expander("분석한 전체 종목"):
+            st.dataframe(all_df,hide_index=True,use_container_width=True)
+    else:
+        st.error("조회 결과가 없습니다. 인터넷 연결 또는 시세 제공 상태를 확인해 주세요.")
+    if failures:
+        st.warning("조회 실패 또는 데이터 부족: "+", ".join(failures))
+st.caption("가격은 거래소 공식 실시간 시세가 아닙니다. 목표가/손절가는 단순 규칙 예시이며 수익을 보장하지 않습니다.")

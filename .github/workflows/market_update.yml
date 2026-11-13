@@ -1,6 +1,6 @@
 name: Update Korean Market Data
 on:
-  schedule:
+  schedule:a
     - cron: '45 9 * * 1-5'  # 18:45 KST
   workflow_dispatch:
 concurrency:

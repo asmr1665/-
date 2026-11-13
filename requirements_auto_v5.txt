@@ -1,4 +1,6 @@
-streamlit>=1.35,<2
+streamlit>=1.37,<2
 pandas>=2,<3
 numpy>=1.26,<3
-pykrx>=1.0.48
+pykrx>=1.0.48,<2
+plotly>=5,<7
+yfinance>=0.2.54,<2

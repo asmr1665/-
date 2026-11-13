@@ -4,7 +4,7 @@ on:
     - cron: '45 9 * * 1-5'  # 18:45 KST
   workflow_dispatch:
 concurrency:
-  group: update-market-data
+  group: update-market-dataa
   cancel-in-progress: false
 permissions:
   contents: write
